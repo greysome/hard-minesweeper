@@ -1,0 +1,4 @@
+genboard
+crocodile/test/crocodile_static
+crocodile/test/minicard_static
+.gdbinit

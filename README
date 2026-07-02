@@ -1,0 +1,25 @@
+An exploration in generating really hard no-guess minesweeper
+puzzles. Still a (massive) work in progress
+
+The goal of my exploration is twofold:
+
+1. Generate boards requiring highly nontrivial logic. (A standard
+  no-guess board can be solved mostly using trivial deductions. The
+  puzzles in 14 Minesweeper Variants are more interesting and I use it
+  as a benchmark of difficulty.)
+
+2. Generate large boards (8x8 and above) reliably quickly
+
+The generator is in genboard.c. It uses a greedy forward/backward-pass
+algorithm to build up a small sufficient set of initial
+reveals. Internally, it applies some basic heuristics to make progress
+(not implemented yet) with a partial reveal set, failing which it
+calls a custom-made cardinality SAT solver called CROCODILE.
+
+The Makefile builds the genboard executable, as well as a test harness
+in crocodile/test/crocodile_static to compare against MiniCARD (the
+test script crocodile/test/run_all.sh expects the user to manually
+insert the minicard_static executable).
+
+same_board.sh is an experimental script that prints out different
+reveal sets randomly generated from the same board.
