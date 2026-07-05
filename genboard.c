@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <inttypes.h>
+#include <stdbit.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -43,15 +44,13 @@ typedef struct {
   int area;
   int mine_count;
   int *board;
-  int num_reveals;
-  int *reveals;
 
   /* For each square, store the reveal/flagged/border state of each of
      its 8 neighbors. This will be used for the basic solver
      heuristics (before the SAT solver is invoked). */
-  char *revealed_masks;
-  char *flagged_masks;
-  char *border_masks;
+  unsigned char *revealed_masks;
+  unsigned char *flagged_masks;
+  unsigned char *interior_masks;
 } BoardState;
 
 #define SQ_MINE         10
@@ -73,15 +72,46 @@ static inline int adjacent_square(int sq, int w, int h, int dir) {
   else if (dir == 1 && y > 0) return sq - w;
   else if (dir == 2 && x < w-1 && y > 0) return sq - w + 1;
   else if (dir == 3 && x > 0) return sq - 1;
-  else if (dir == 4) return sq;
-  else if (dir == 5 && x < w-1) return sq + 1;
-  else if (dir == 6 && x > 0 && y < h-1) return sq + w - 1;
-  else if (dir == 7 && y < h-1) return sq + w;
-  else if (dir == 8 && x < w-1 && y < h-1) return sq + w + 1;
+  else if (dir == 4 && x < w-1) return sq + 1;
+  else if (dir == 5 && x > 0 && y < h-1) return sq + w - 1;
+  else if (dir == 6 && y < h-1) return sq + w;
+  else if (dir == 7 && x < w-1 && y < h-1) return sq + w + 1;
+  else if (dir == 8) return sq;
   else return -1;
 }
 
-void board_debug(BoardState *bs) {
+void bs_init(BoardState *bs, int w, int h, int mine_count) {
+  bs->w = w;
+  bs->h = h;
+  int area = w * h;
+  bs->area = area;
+  bs->mine_count = mine_count;
+  bs->board = malloc(area * sizeof(int));
+  bs->revealed_masks = malloc(area);
+  bs->flagged_masks = malloc(area);
+  bs->interior_masks = malloc(area);
+}
+
+void bs_copy(BoardState *bs, BoardState *obs) {
+  bs->w = obs->w;
+  bs->h = obs->h;
+  int area = obs->area;
+  bs->area = area;
+  bs->mine_count = obs->mine_count;
+  memcpy(bs->board, obs->board, area * sizeof(int));
+  memcpy(bs->revealed_masks, obs->revealed_masks, area);
+  memcpy(bs->flagged_masks, obs->flagged_masks, area);
+  memcpy(bs->interior_masks, obs->interior_masks, area);
+}
+
+void bs_free(BoardState *bs) {
+  free(bs->board);
+  free(bs->revealed_masks);
+  free(bs->flagged_masks);
+  free(bs->interior_masks);
+}
+
+void bs_debug(BoardState *bs) {
   int w = bs->w;
   int area = bs->area;
   int *board = bs->board;
@@ -92,31 +122,6 @@ void board_debug(BoardState *bs) {
       fprintf(stderr, "\033[32m");
     else if (square & SQ_FLAG_BIT)
       fprintf(stderr, "\033[31m");
-
-    if (SQ_NO_BITS(square) == SQ_MINE)
-      fprintf(stderr, "X");
-    else
-      fprintf(stderr, "%c", '0' + SQ_NO_BITS(square));
-
-    fprintf(stderr, "\033[0m");
-    if (sq % w == w - 1)
-      fprintf(stderr, "\n");
-  }
-}
-
-void debug_solve(BoardState *bs, Solver *solver) {
-  int w = bs->w;
-  int area = bs->area;
-  int *board = bs->board;
-
-  for (int sq = 0; sq < area; sq++) {
-    int square = board[sq];
-    if (square & SQ_REVEAL_BIT)
-      fprintf(stderr, "\033[34m");
-    else if ((solver->vals[sq] & 1) == 1)
-      fprintf(stderr, "\033[31m");
-    else
-      fprintf(stderr, "\033[32m");
 
     if (SQ_NO_BITS(square) == SQ_MINE)
       fprintf(stderr, "X");
@@ -260,9 +265,7 @@ int get_frontier(BoardState *bs, int *frontier) {
   for (int sq = 0; sq < area; sq++) {
     int square = board[sq];
     if (square & SQ_REVEAL_BIT) {
-      for (int dir = 0; dir < 9; dir++) {
-        if (dir == 4)
-          dir++;
+      for (int dir = 0; dir < 8; dir++) {
         int asq = adjacent_square(sq, w, h, dir);
         if (asq == -1)
           continue;
@@ -297,15 +300,12 @@ relax:
   for (int sq = 0; sq < area; sq++) {
     int square = board[sq];
     if (square & bit1) {
-      for (int dir = 0; dir < 9; dir++) {
-        if (dir == 4)
-          dir++;
+      for (int dir = 0; dir < 8; dir++) {
         int asq = adjacent_square(sq, w, h, dir);
         if (asq == -1)
           continue;
         int asquare = board[asq];
-        if (!(asquare & SQ_FLAG_BIT) &&
-            !(asquare & SQ_REVEAL_BIT) &&
+        if (!(asquare & SQ_REVEAL_BIT) &&
             !(asquare & bit1) &&
             !(asquare & bit2)) {
           frontier[k++] = asq;
@@ -347,9 +347,7 @@ void solver_from_board(BoardState *bs, Solver *solver) {
 
     if (square & SQ_REVEAL_BIT) {
       int n = 0;
-      for (int dir = 0; dir < 9; dir++) {
-        if (dir == 4)
-          dir++;
+      for (int dir = 0; dir < 8; dir++) {
         int adj = adjacent_square(sq, w, h, dir);
         if (adj != -1)
           slits[n++] = adj + 1;
@@ -363,21 +361,259 @@ void solver_from_board(BoardState *bs, Solver *solver) {
   }
 }
 
+void set_neighbor_masks(int sq, BoardState *bs, unsigned char *masks) {
+  int w = bs->w;
+  int h = bs->h;
+
+  for (int dir = 0; dir < 8; dir++) {
+    int asq = adjacent_square(sq, w, h, dir);
+    if (asq == -1)
+      continue;
+    /* This is correct, think about it a bit */
+    masks[asq] |= (1 << dir);
+  }
+}
+
+void unset_neighbor_masks(int sq, BoardState *bs, unsigned char *masks) {
+  int w = bs->w;
+  int h = bs->h;
+
+  for (int dir = 0; dir < 8; dir++) {
+    int asq = adjacent_square(sq, w, h, dir);
+    if (asq == -1)
+      continue;
+    /* This is correct, think about it a bit */
+    masks[asq] &= ~(1 << dir);
+  }
+}
+
+void reveal_masked(int sq, BoardState *bs, unsigned char mask) {
+  int w = bs->w;
+  int h = bs->h;
+  int *board = bs->board;
+  unsigned char *revealed_masks = bs->revealed_masks;
+
+  for (int dir = 7; dir >= 0; dir--) {
+    if (mask & 1) {
+      int asq = adjacent_square(sq, w, h, dir);
+      ASSERT(!(board[asq] & SQ_REVEAL_BIT));
+      board[asq] |= SQ_REVEAL_BIT;
+      set_neighbor_masks(asq, bs, revealed_masks);
+    }
+    mask >>= 1;
+  }
+}
+
+void flag_masked(int sq, BoardState *bs, unsigned char mask) {
+  int w = bs->w;
+  int h = bs->h;
+  int *board = bs->board;
+  unsigned char *flagged_masks = bs->flagged_masks;
+
+  for (int dir = 7; dir >= 0; dir--) {
+    if (mask & 1) {
+      int asq = adjacent_square(sq, w, h, dir);
+      ASSERT(!(board[asq] & SQ_FLAG_BIT));
+      board[asq] |= SQ_FLAG_BIT;
+      set_neighbor_masks(asq, bs, flagged_masks);
+    }
+    mask >>= 1;
+  }
+}
+
+/* Takes in two neighbour sets represented as bitmasks centered around
+   two squares, and compute the set difference, represented as a
+   bitmask centered around the first square. */
+void diff_and_intersect_mask(
+  int sq, unsigned char mask, int osq, unsigned char omask, BoardState *bs,
+  unsigned char *diff_mask, unsigned char *intersect_mask
+) {
+  int w = bs->w;
+  int h = bs->h;
+  unsigned char dmask = 0;
+  unsigned char imask = 0;
+
+  for (int dir = 7; dir >= 0; dir--) {
+    if (mask & 1) {
+      int asq = adjacent_square(sq, w, h, dir);
+      bool present = false;
+      unsigned char omsk = omask;
+
+      for (int odir = 7; odir >= 0; odir--) {
+        if (omsk & 1) {
+          int aosq = adjacent_square(osq, w, h, dir);
+          if (asq == aosq) {
+            imask |= (1 << (7 - dir));
+            present = true;
+            break;
+          }
+        }
+        omsk >>= 1;
+      }
+
+      if (!present)
+        dmask |= (1 << (7 - dir));
+    }
+    mask >>= 1;
+  }
+
+  if (diff_mask != NULL)
+    *diff_mask = dmask;
+  if (intersect_mask != NULL)
+    *intersect_mask = imask;
+}
+
+int apply_heuristics(BoardState *bs) {
+  int w = bs->w;
+  int h = bs->h;
+  int area = bs->area;
+  int *board = bs->board;
+  unsigned char *revealed_masks = bs->revealed_masks;
+  unsigned char *flagged_masks = bs->flagged_masks;
+  unsigned char *interior_masks = bs->interior_masks;
+
+  int deductions = 0;
+
+  for (int sq = 0; sq < area; sq++) {
+    int square = board[sq];
+    if (!(square & SQ_REVEAL_BIT))
+      continue;
+
+    unsigned char rmask = revealed_masks[sq];
+    unsigned char fmask = flagged_masks[sq];
+    unsigned char imask = interior_masks[sq];
+
+    ASSERT(!(rmask & fmask));
+    unsigned char unknown_mask = imask & ~fmask & ~rmask;
+    int unknown_count = stdc_count_ones_uc(unknown_mask);
+    int effective_count = SQ_NO_BITS(square) - stdc_count_ones_uc(fmask);
+    ASSERT(effective_count >= 0);
+
+    /* -------- 1-square deductions -------- */
+
+    if (unknown_count == 0)
+      goto twosquare;
+
+    /* If effective count = 0, then all unknown squares are safe. */
+    if (effective_count == 0) {
+      reveal_masked(sq, bs, unknown_mask);
+      deductions += stdc_count_ones_uc(unknown_mask);
+    }
+
+    /* If effective count = unknown count, then all unknown squares
+       are mines. */
+    if (effective_count == unknown_count) {
+      flag_masked(sq, bs, unknown_mask);
+    }
+
+    /* -------- 2-square deductions -------- */
+
+twosquare:
+    int x = sq % w;
+    int y = sq / w;
+
+    /* Only pairs of squares at most 2 king moves apart can yield a
+       deduction. By symmetry, for each square we need check at most
+       (25-1)/2 = 12 candidate counterparts. */
+
+    int dx = 1;
+    int dy = 0;
+    for (; dy <= 2; dy++) {
+      for (; dx <= 2; dx++) {
+        /* These have to be constantly updated as deductions in
+           adjacent squares affect this squares' masks */
+        rmask = revealed_masks[sq];
+        fmask = flagged_masks[sq];
+        unknown_mask = imask & ~fmask & ~rmask;
+        unknown_count = stdc_count_ones_uc(unknown_mask);
+        effective_count = SQ_NO_BITS(square) - stdc_count_ones_uc(fmask);
+
+        int ox = x + dx;
+        int oy = y + dy;
+        if (ox < 0 || ox > w-1 || oy < 0 || oy > h-1)
+          continue;
+
+        int osq = oy * w + ox;
+        int osquare = board[osq];
+        if (!(osquare & SQ_REVEAL_BIT))
+          continue;
+
+        unsigned char o_rmask = revealed_masks[osq];
+        unsigned char o_fmask = flagged_masks[osq];
+        unsigned char o_imask = interior_masks[osq];
+        unsigned char o_unknown_mask = o_imask & ~o_fmask & ~o_rmask;
+        int o_effective_count = SQ_NO_BITS(osquare) - stdc_count_ones_uc(o_fmask);
+        unsigned char dmask;
+        unsigned char dmask2;
+        unsigned char intersect_mask;
+
+        int num_diff = effective_count - o_effective_count;
+
+        /* Set-difference rule: if squares A and B have neighbor sets
+           S1, S2 and |S1\S2| = A-B, then all squares in S1\S2 are
+           mines and all squares in S1 cap S2 are safe. */
+
+        if (num_diff < 0) {
+          diff_and_intersect_mask(osq, o_unknown_mask, sq, unknown_mask, bs, &dmask, &intersect_mask);
+          if ((int) stdc_count_ones_uc(dmask) == -num_diff) {
+            flag_masked(osq, bs, dmask);
+            reveal_masked(osq, bs, intersect_mask);
+            deductions += stdc_count_ones_uc(intersect_mask);
+          }
+        }
+
+        else if (num_diff > 0) {
+          diff_and_intersect_mask(sq, unknown_mask, osq, o_unknown_mask, bs, &dmask, &intersect_mask);
+          if ((int) stdc_count_ones_uc(dmask) == num_diff) {
+            flag_masked(sq, bs, dmask);
+            reveal_masked(sq, bs, intersect_mask);
+            deductions += stdc_count_ones_uc(intersect_mask);
+          }
+        }
+
+        /* Subset rule: if squares A and B are equal and have neighbor
+           sets S1 subset S2, then all squares in S2\S1 are safe. */
+
+        else {
+          diff_and_intersect_mask(sq, unknown_mask, osq, o_unknown_mask, bs, &dmask, NULL);
+          diff_and_intersect_mask(osq, o_unknown_mask, sq, unknown_mask, bs, &dmask2, NULL);
+
+          if (stdc_count_ones_uc(dmask) == 0) {
+            reveal_masked(osq, bs, dmask2);
+            deductions += stdc_count_ones_uc(dmask2);
+          }
+          else if (stdc_count_ones_uc(dmask2) == 0) {
+            reveal_masked(sq, bs, dmask);
+            deductions += stdc_count_ones_uc(dmask);
+          }
+        }
+      }
+      dx = -2;
+    }
+  }
+
+  return deductions;
+}
+
 /* From a given board state (with some reveals and flags), keep making
    deductions and revealing new squares, until no more new deductions
    can be made. */
 int solver_grind(BoardState *bs, Solver *solver) {
   int area = bs->area;
   int *board = bs->board;
+  unsigned char *revealed_masks = bs->revealed_masks;
+  unsigned char *flagged_masks = bs->flagged_masks;
 
   int total_deductions = 0;
-
-  /* The board is updated as the solver makes deductions. This
-     progress has to be undone at the end. */
-  int old_board[area]; /* Sorry, VLAs are too convenient */
-  memcpy(old_board, board, area * sizeof(int));
+  int *frontier = malloc(area * sizeof(int));
 
   while (1) {
+    int deductions;
+    do {
+      deductions = apply_heuristics(bs);
+      total_deductions += deductions;
+    } while (deductions > 0);
+
 again:
     /* Find any consistent arrangement of mines in the frontier, given
        the current reveals */
@@ -385,7 +621,6 @@ again:
     solver_solve(solver);
     ASSERT(solver->is_sat == 1);
 
-    int frontier[area];
     int k = get_frontier(bs, frontier);
 
     /* No frontier means the board is completely solved */
@@ -422,15 +657,23 @@ again:
       }
 
       else {
+        int dsq;
+
         if (slit < 0) {
-          ASSERT(SQ_NO_BITS(board[-slit-1]) != SQ_MINE);
-          board[-slit-1] |= SQ_REVEAL_BIT;
+          dsq = -slit - 1;
+          ASSERT(SQ_NO_BITS(board[dsq]) != SQ_MINE);
+          board[dsq] |= SQ_REVEAL_BIT;
+          set_neighbor_masks(dsq, bs, revealed_masks);
           total_deductions++;
         }
+
         else {
-          ASSERT(SQ_NO_BITS(board[slit-1]) == SQ_MINE);
-          board[slit-1] |= SQ_FLAG_BIT;
+          dsq = slit - 1;
+          ASSERT(SQ_NO_BITS(board[dsq]) == SQ_MINE);
+          board[dsq] |= SQ_FLAG_BIT;
+          set_neighbor_masks(dsq, bs, flagged_masks);
         }
+
         goto again;
       }
     }
@@ -438,126 +681,207 @@ again:
     break;
   }
 
-  memcpy(board, old_board, area * sizeof(int));
+  free(frontier);
   return total_deductions;
 }
 
-int forward_pass(BoardState *bs, Solver *solver, Pcg *pcg) {
+/* Generate a set of sufficient initial clues incrementally, as follows:
+   1. Initialise the algorithm with two randomly placed clues.
+
+   2. Suppose current clueset is S. Every unrevealed square that is <=
+      2 king moves from a clue is a candidate for the next clue. For
+      each candidate square s, make as much progress as possible on
+      the clueset S + {s} (in solver_grind()), using a combination of
+      heuristics and SAT solving.
+
+   3. Pick s that gives the most progress and add it to S. If board is
+      completely solved, then return S. */
+int forward_pass(BoardState *bs, int *clues, Solver *solver, Pcg *pcg) {
   int w = bs->w;
+  int h = bs->h;
   int area = bs->area;
   int mine_count = bs->mine_count;
   int *board = bs->board;
-  int *reveals = bs->reveals;
+  unsigned char *revealed_masks = bs->revealed_masks;
+  unsigned char *flagged_masks = bs->flagged_masks;
 
   int square;
-  int num_reveals = 0;
-  int next_reveal;
+  /* Initial clues so the solver has something to work with  */
+  int num_clues = 2;
+  int num_reveals = 2;
+  /* The next revealed square */
+  int csq;
 
-  pcg_next(pcg);
+  /* First reveal in random spot */
+  pcg_next(pcg); /* I noticed that if the high bits of the initial state are 0, then
+                    two pcg_next() iterations are needed for noise to show up in the
+                    high bits. */
   do {
-    next_reveal = pcg_next_upto(pcg, area);
-    square = board[next_reveal];
+    csq = pcg_next_upto(pcg, area);
+    square = board[csq];
   } while (square == SQ_MINE);
+  int x1 = csq % w;
+  int y1 = csq / w;
+  clues[0] = csq;
+  board[csq] |= SQ_REVEAL_BIT;
+  set_neighbor_masks(csq, bs, revealed_masks);
 
-  int x1 = next_reveal % w;
-  int y1 = next_reveal / w;
-  reveals[num_reveals++] = next_reveal;
-  board[next_reveal] |= SQ_REVEAL_BIT;
-
+  /* Second reveal, distance <= 3 away */
   while (1) {
-    next_reveal = pcg_next_upto(pcg, area);
-    square = board[next_reveal];
+    csq = pcg_next_upto(pcg, area);
+    square = board[csq];
     if ((square & SQ_REVEAL_BIT) ||
         SQ_NO_BITS(square) == SQ_MINE)
       continue;
 
-    int x2 = next_reveal % w;
-    int y2 = next_reveal / w;
+    int x2 = csq % w;
+    int y2 = csq / w;
     int dx = x1 > x2 ? x1-x2 : x2-x1;
     int dy = y1 > y2 ? y1-y2 : y2-y1;
     int dist = dx + dy;
     if (dist > 3)
       continue;
 
-    reveals[num_reveals++] = next_reveal;
-    board[next_reveal] |= SQ_REVEAL_BIT;
+    clues[1] = csq;
+    board[csq] |= SQ_REVEAL_BIT;
+    set_neighbor_masks(csq, bs, revealed_masks);
     break;
   }
 
   int frontier2[area];
   int max_deductions;
 
-again:
-  max_deductions = -1;
-  /* Iterate through all non-mine squares at distance <= 2 from a
-     revealed square. We will next reveal the one that results in the
-     most solver deductions. */
+  /* Can initialise mine_count with dummy value because it will be
+     copied directly from another BoardState */
+  BoardState old_bs;
+  bs_init(&old_bs, w, h, 0);
+  BoardState best_bs;
+  bs_init(&best_bs, w, h, 0);
 
-  board_debug(bs);
-  printf("\n");
-  int k = get_frontier2(bs, frontier2);
+  while (1) {
+    bs_copy(&old_bs, bs);
+    max_deductions = -1;
 
-  for (int i = 0; i < k; i++) {
-    int sq = frontier2[i];
-    square = board[sq];
-    if (SQ_NO_BITS(square) == SQ_MINE || (square & SQ_REVEAL_BIT))
-      continue;
-    board[sq] |= SQ_REVEAL_BIT;
-    solver_from_board(bs, solver);
-    int deductions = solver_grind(bs, solver);
-    if (deductions > max_deductions) {
-      max_deductions = deductions;
-      next_reveal = sq;
+    /* Iterate through all non-mine squares at distance <= 2 from a
+       revealed square. We will next reveal the one that results in the
+       most solver deductions. */
+
+    int k = get_frontier2(bs, frontier2);
+
+    for (int i = 0; i < k; i++) {
+      int sq = frontier2[i];
+      square = board[sq];
+
+      if (SQ_NO_BITS(square) == SQ_MINE || (square & SQ_REVEAL_BIT))
+        continue;
+
+      /* Tentatively try a new clue */
+      board[sq] |= SQ_REVEAL_BIT;
+      set_neighbor_masks(sq, bs, revealed_masks);
+
+      solver_from_board(bs, solver);
+      int deductions = solver_grind(bs, solver);
+      if (deductions > max_deductions) {
+        max_deductions = deductions;
+        csq = sq;
+        bs_copy(&best_bs, bs);
+      }
+
+      /* Undo the partially solved board */
+      bs_copy(bs, &old_bs);
     }
-    board[sq] &= ~SQ_REVEAL_BIT;
+
+    bs_copy(bs, &best_bs);
+
+    clues[num_clues] = csq;
+    num_clues++;
+    num_reveals += 1 + max_deductions;
+
+    bs_debug(bs); fprintf(stderr, "\n");
+
+    ASSERT(num_reveals + mine_count <= area);
+    if (num_reveals + mine_count == area) {
+      bs_free(&best_bs);
+      bs_free(&old_bs);
+
+      /* We have a sufficient set of clues, now remove all the
+         deductions and flags for the backpass */
+      for (int sq = 0; sq < area; sq++) {
+        if (board[sq] & SQ_FLAG_BIT) {
+          board[sq] &= ~SQ_FLAG_BIT;
+          unset_neighbor_masks(sq, bs, flagged_masks);
+        }
+        else if (board[sq] & SQ_REVEAL_BIT) {
+          board[sq] &= ~SQ_REVEAL_BIT;
+          unset_neighbor_masks(sq, bs, revealed_masks);
+        }
+      }
+      for (int i = 0; i < num_clues; i++) {
+        int sq = clues[i];
+        board[sq] |= SQ_REVEAL_BIT;
+        set_neighbor_masks(sq, bs, revealed_masks);
+      }
+
+      return num_clues;
+    }
   }
-
-  if (max_deductions <= 2) {
-    /* Solver could make no progress, choose a random square in the
-       frontier2 */
-    do {
-      next_reveal = frontier2[pcg_next_upto(pcg, k)];
-      square = board[next_reveal];
-    } while (SQ_NO_BITS(square) == SQ_MINE);
-  }
-
-  reveals[num_reveals++] = next_reveal;
-  board[next_reveal] |= SQ_REVEAL_BIT;
-
-  if (num_reveals + max_deductions + mine_count == area)
-    return num_reveals;
-
-  goto again;
 }
 
-void backward_pass(BoardState *bs, Solver *solver) {
+/* Prune the clueset generated from forward_pass(), by repeatedly
+   removing clues until the solver can no longer completely solve the
+   board. */
+int backward_pass(BoardState *bs, int *clues, int num_clues, Solver *solver) {
+  int w = bs->w;
+  int h = bs->h;
   int area = bs->area;
   int mine_count = bs->mine_count;
   int *board = bs->board;
-  int num_reveals = bs->num_reveals;
-  int *reveals = bs->reveals;
+  unsigned char *revealed_masks = bs->revealed_masks;
 
-  /* Repeatedly remove reveals until the solver can't solve it */
-  for (int i = 0; i < num_reveals; i++) {
-    int reveal = reveals[i];
-    board[reveal] &= ~SQ_REVEAL_BIT;
+  BoardState old_bs;
+  bs_init(&old_bs, w, h, 0);
+  bs_copy(&old_bs, bs);
+  bs_debug(bs); fprintf(stderr, "\n");
+
+  for (int i = 0; i < num_clues; i++) {
+    int csq = clues[i];
+    board[csq] &= ~SQ_REVEAL_BIT;
+    unset_neighbor_masks(csq, bs, revealed_masks);
+
     int deductions = solver_grind(bs, solver);
 
-    if (num_reveals - 1 + deductions + mine_count == area) {
-      reveals[i] = reveals[num_reveals - 1];
-      num_reveals--;
+    if (num_clues - 1 + deductions + mine_count == area) {
+      clues[i] = clues[num_clues - 1];
+      num_clues--;
       i--;
-      board_debug(bs);
-      printf("\n");
+
+      bs_copy(bs, &old_bs);
+
+      board[csq] &= ~SQ_REVEAL_BIT;
+      unset_neighbor_masks(csq, bs, revealed_masks);
+
+      bs_debug(bs); fprintf(stderr, "\n");
+      bs_copy(&old_bs, bs);
     }
-    else
-      board[reveal] |= SQ_REVEAL_BIT;
+    else {
+      bs_copy(bs, &old_bs);
+    }
   }
+
+  bs_debug(bs); fprintf(stderr, "\n");
+  bs_free(&old_bs);
+  return num_clues;
 }
 
 /* -----------------------------------------------------------------------------
                                      MAIN
    ----------------------------------------------------------------------------- */
+
+int _compare_int(const void *x, const void *y) {
+  int a = *((int *) x);
+  int b = *((int *) y);
+  return a < b ? -1 : a == b ? 0 : 1;
+}
 
 int main(int argc, char **argv) {
   if (argc != 6) {
@@ -566,10 +890,11 @@ int main(int argc, char **argv) {
   }
 
   BoardState bs;
-  bs.w = (int) strtoul(argv[1], NULL, 10);
-  bs.h = (int) strtoul(argv[2], NULL, 10);
-  bs.area = bs.w * bs.h;
-  bs.mine_count = (int) strtoul(argv[3], NULL, 10);
+  int w = (int) strtoul(argv[1], NULL, 10);
+  int h = (int) strtoul(argv[2], NULL, 10);
+  int area = w * h;
+  int mine_count = (int) strtoul(argv[3], NULL, 10);
+  bs_init(&bs, w, h, mine_count);
 
   Pcg board_pcg;
   board_pcg.state = strtoull(argv[4], NULL, 10);
@@ -579,63 +904,57 @@ int main(int argc, char **argv) {
   solve_pcg.state = strtoull(argv[5], NULL, 10);
   solve_pcg.inc = 676767676767676767ULL;
 
-  fprintf(stderr, "w=%d h=%d mines=%d board_seed=%" PRIu64 " solve_seed=%" PRIu64 "\n",
-          bs.w, bs.h, bs.mine_count, board_pcg.state, solve_pcg.state);
-
-  bs.board = malloc(bs.area * sizeof(int));
-  bs.reveals = malloc(bs.area * sizeof(int));
-  bs.num_reveals = 0;
-  bs.revealed_masks = malloc(bs.area);
-  bs.flagged_masks = malloc(bs.area);
-  bs.border_masks = malloc(bs.area);
   int *buf = malloc((bs.area + bs.mine_count) * sizeof(int));
 
   for (int sq = 0; sq < bs.area; sq++) {
     bs.revealed_masks[sq] = 0;
     bs.flagged_masks[sq] = 0;
 
-    char border_mask = 0;
+    unsigned char imask = 0b11111111;
     int x = sq % bs.w;
     int y = sq / bs.w;
     if (x == 0)
-      border_mask |= 0b10010100;
+      imask &= 0b01101011;
     else if (x == bs.w - 1)
-      border_mask |= 0b00101001;
+      imask &= 0b11010110;
     if (y == 0)
-      border_mask |= 0b11100000;
+      imask &= 0b00011111;
     else if (y == bs.h - 1)
-      border_mask |= 0b00000111;
-    bs.border_masks[sq] = border_mask;
+      imask &= 0b11111000;
+    bs.interior_masks[sq] = imask;
   }
 
-  /* populate bs.board */
   place_mines(&bs, buf, &board_pcg);
 
   Solver solver;
   solver_init_bufs(&solver);
-  /* populate bs.reveals */
-  bs.num_reveals = forward_pass(&bs, &solver, &solve_pcg);
-  /* prune bs.reveals */
-  backward_pass(&bs, &solver);
 
-  board_debug(&bs);
-  printf("\n");
+  fprintf(stderr, "FORWARD PASS\n");
+  int num_clues;
+  int *clues = malloc(area * sizeof(int));
+  num_clues = forward_pass(&bs, clues, &solver, &solve_pcg);
 
-  for (int sq = 0; sq < bs.area; sq++) {
+  fprintf(stderr, "BACKWARD PASS\n");
+  num_clues = backward_pass(&bs, clues, num_clues, &solver);
+
+  qsort(clues, num_clues, sizeof(int), _compare_int);
+
+  printf("{\"w\": %d, \"h\": %d, \"board\": \"", w, h);
+  for (int sq = 0; sq < area; sq++) {
     int square = bs.board[sq];
-    if (square & SQ_REVEAL_BIT)
-      printf("%d", SQ_NO_BITS(square));
+    if (square == SQ_MINE)
+      printf("!");
     else
-      printf(".");
-    if (sq % bs.w == bs.w - 1)
-      printf("\n");
+      printf("%d", SQ_NO_BITS(square));
   }
+  printf("\", \"reveals\": [");
+  for (int i = 0; i < num_clues - 1; i++)
+    printf("%d, ", clues[i]);
+  printf("%d]", clues[num_clues - 1]);
+  printf(", \"mines\": %d}\n", mine_count);
 
   solver_free(&solver);
+  bs_free(&bs);
+  free(clues);
   free(buf);
-  free(bs.board);
-  free(bs.reveals);
-  free(bs.revealed_masks);
-  free(bs.flagged_masks);
-  free(bs.border_masks);
 }

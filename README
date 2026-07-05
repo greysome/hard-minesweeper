@@ -4,17 +4,29 @@ puzzles. Still a (massive) work in progress
 The goal of my exploration is twofold:
 
 1. Generate boards requiring highly nontrivial logic. (A standard
-  no-guess board can be solved mostly using trivial deductions. The
-  puzzles in 14 Minesweeper Variants are more interesting and I use it
-  as a benchmark of difficulty.)
+   no-guess board can be solved mostly using trivial deductions. The
+   puzzles in 14 Minesweeper Variants are more interesting and I use it
+   as a benchmark of difficulty.)
 
 2. Generate large boards (8x8 and above) reliably quickly
 
-The generator is in genboard.c. It uses a greedy forward/backward-pass
-algorithm to build up a small sufficient set of initial
-reveals. Internally, it applies some basic heuristics to make progress
-(not implemented yet) with a partial reveal set, failing which it
-calls a custom-made cardinality SAT solver called CROCODILE.
+The generator program is compiled from genboard.c, and it outputs a
+JSON representation of the board to stdout (progress is printed to
+stderr). It does one forward pass to incrementally build up a small
+sufficient set of initial clues, then a backward pass to prune away
+redundant clues.
+
+(Note: starting the position with a clueset is an innovation from 14
+Minesweeper Variants. A standard game would typically start with a
+blank board.)
+
+Crucially, the generator relies on a powerful solver to determine
+whether a given clueset is solvable without guesses, and more
+specifically how much progress it can make. To maximise solver speed
+and strength, it first applies some basic heuristics, failing which it
+calls a custom-made cardinality SAT solver called CROCODILE, which is
+theoretically able to definitively answer any Minesweeper position
+(though it gets very slow on large instances).
 
 The Makefile builds the genboard executable, as well as a test harness
 in crocodile/test/crocodile_static to compare against MiniCARD (the
