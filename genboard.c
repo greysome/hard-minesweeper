@@ -626,13 +626,14 @@ void solver_grind(BoardState *bs, Solver *solver, DeductionStats *stats) {
   while (1) {
     int d;
     int newd;
+
+again:
     do {
       d = stats->reveal_deductions + stats->flag_deductions;
       apply_heuristics(bs, stats);
       newd = stats->reveal_deductions + stats->flag_deductions;
     } while (newd - d > 0);
 
-again:
     /* Find any consistent arrangement of mines in the frontier, given
        the current reveals */
     solver_from_board(bs, solver);
@@ -771,7 +772,7 @@ int forward_pass(BoardState *bs, int *clues, Solver *solver, Pcg *pcg) {
   }
 
   int frontier2[area];
-  int max_new_deductions;
+  int max_score;
   int total_reveal_deductions = 0;
 
   /* Can initialise mine_count with dummy value because it will be
@@ -785,7 +786,7 @@ int forward_pass(BoardState *bs, int *clues, Solver *solver, Pcg *pcg) {
     DeductionStats best_stats;
     best_stats.reveal_deductions = 0;
     bs_copy(&old_bs, bs);
-    max_new_deductions = -1;
+    max_score = -1;
 
     /* Iterate through all non-mine squares at distance <= 2 from a
        revealed square. We will next reveal the one that results in the
@@ -813,10 +814,11 @@ int forward_pass(BoardState *bs, int *clues, Solver *solver, Pcg *pcg) {
       solver_grind(bs, solver, &tmp_stats);
       ASSERT(tmp_stats.flag_deductions + tmp_stats.reveal_deductions ==
              tmp_stats.heuristic_deductions + tmp_stats.sat_deductions);
-      int d = tmp_stats.flag_deductions + tmp_stats.reveal_deductions;
+      /* Reward clues that yield a lot of new deductions, but particularly hard deductions */
+      int score = tmp_stats.flag_deductions + tmp_stats.reveal_deductions + 2 * tmp_stats.sat_deductions;
 
-      if (d > max_new_deductions) {
-        max_new_deductions = d;
+      if (score > max_score) {
+        max_score = score;
         csq = sq;
         bs_copy(&best_bs, bs);
         memcpy(&best_stats, &tmp_stats, sizeof(DeductionStats));
@@ -829,7 +831,8 @@ int forward_pass(BoardState *bs, int *clues, Solver *solver, Pcg *pcg) {
     bs_copy(bs, &best_bs);
     total_reveal_deductions += best_stats.reveal_deductions;
 
-    bs_debug(bs); fprintf(stderr, "\n");
+    fprintf(stderr, "clue %d: %d easy %d hard\n", num_clues, best_stats.heuristic_deductions, best_stats.sat_deductions);
+    bs_debug(bs);
 
     clues[num_clues++] = csq;
 
@@ -895,6 +898,7 @@ int backward_pass(BoardState *bs, int *clues, int num_clues, DeductionStats *sta
 
     ASSERT(tmp_stats.flag_deductions + tmp_stats.reveal_deductions ==
            tmp_stats.heuristic_deductions + tmp_stats.sat_deductions);
+    ASSERT(num_clues - 1 + tmp_stats.reveal_deductions + mine_count <= area);
 
     if (num_clues - 1 + tmp_stats.reveal_deductions + mine_count == area) {
       clues[i] = clues[num_clues - 1];
@@ -983,7 +987,7 @@ int main(int argc, char **argv) {
   int *clues = malloc(area * sizeof(int));
   num_clues = forward_pass(&bs, clues, &solver, &solve_pcg);
 
-  fprintf(stderr, "BACKWARD PASS\n");
+  fprintf(stderr, "\nBACKWARD PASS\n");
   DeductionStats stats;
   num_clues = backward_pass(&bs, clues, num_clues, &stats, &solver);
 
