@@ -146,6 +146,25 @@ void bs_debug(BoardState *bs) {
   }
 }
 
+void bs_debug2(BoardState *bs) {
+  int w = bs->w;
+  int area = bs->area;
+  int *board = bs->board;
+
+  for (int sq = 0; sq < area; sq++) {
+    int square = board[sq];
+    if (square & SQ_REVEAL_BIT)
+      fprintf(stderr, "%c", '0' + SQ_NO_BITS(square));
+    else if (square & SQ_FLAG_BIT)
+      fprintf(stderr, "X");
+    else
+      fprintf(stderr, ".");
+
+    if (sq % w == w - 1)
+      fprintf(stderr, "\n");
+  }
+}
+
 /* -----------------------------------------------------------------------------
                               MINE PLACEMENT CODE
    ----------------------------------------------------------------------------- */
@@ -337,7 +356,7 @@ relax:
   return k;
 }
 
-void solver_from_board(BoardState *bs, Solver *solver) {
+void solver_from_board(BoardState *bs, Solver *solver, int use_mine_count) {
   int w = bs->w;
   int h = bs->h;
   int area = bs->area;
@@ -349,9 +368,14 @@ void solver_from_board(BoardState *bs, Solver *solver) {
   ASSERT(status);
 
   /* Global mine count */
-  for (int sq = 0; sq < area; sq++)
-    slits[sq] = sq + 1;
-  solver_add_equals(solver, area, mine_count, slits);
+  int num_unrevealed = 0;
+  if (use_mine_count == 1) {
+    for (int sq = 0; sq < area; sq++) {
+      if (!(board[sq] & SQ_REVEAL_BIT))
+        slits[num_unrevealed++] = sq + 1;
+    }
+    solver_add_equals(solver, num_unrevealed, mine_count, slits);
+  }
 
   /* Square clues */
   for (int sq = 0; sq < area; sq++) {
@@ -610,7 +634,7 @@ twosquare:
 /* From a given board state (with some reveals and flags), keep making
    deductions and revealing new squares, until no more new deductions
    can be made. */
-void solver_grind(BoardState *bs, Solver *solver, DeductionStats *stats) {
+void solver_grind(BoardState *bs, Solver *solver, DeductionStats *stats, int use_mine_count) {
   int area = bs->area;
   int *board = bs->board;
   unsigned char *revealed_masks = bs->revealed_masks;
@@ -636,7 +660,7 @@ again:
 
     /* Find any consistent arrangement of mines in the frontier, given
        the current reveals */
-    solver_from_board(bs, solver);
+    solver_from_board(bs, solver, use_mine_count);
     solver_solve(solver);
     ASSERT(solver->is_sat == 1);
 
@@ -663,7 +687,7 @@ again:
 
       int fsq = frontier[i];
       int slit = (valid_vals[i] & 1) ? (fsq+1) : -(fsq+1);
-      solver_from_board(bs, solver);
+      solver_from_board(bs, solver, use_mine_count);
       solver_assume(solver, -slit);
       solver_solve(solver);
 
@@ -716,7 +740,7 @@ again:
 
    3. Pick s that gives the most progress and add it to S. If board is
       completely solved, then return S. */
-int forward_pass(BoardState *bs, int *clues, Solver *solver, Pcg *pcg) {
+int forward_pass(BoardState *bs, int *clues, Solver *solver, Pcg *pcg, int use_mine_count) {
   int w = bs->w;
   int h = bs->h;
   int area = bs->area;
@@ -808,10 +832,10 @@ int forward_pass(BoardState *bs, int *clues, Solver *solver, Pcg *pcg) {
       board[sq] |= SQ_REVEAL_BIT;
       set_neighbor_masks(sq, bs, revealed_masks);
 
-      solver_from_board(bs, solver);
+      solver_from_board(bs, solver, use_mine_count);
 
       DeductionStats tmp_stats;
-      solver_grind(bs, solver, &tmp_stats);
+      solver_grind(bs, solver, &tmp_stats, use_mine_count);
       ASSERT(tmp_stats.flag_deductions + tmp_stats.reveal_deductions ==
              tmp_stats.heuristic_deductions + tmp_stats.sat_deductions);
       /* Reward clues that yield a lot of new deductions, but particularly hard deductions */
@@ -868,7 +892,7 @@ int forward_pass(BoardState *bs, int *clues, Solver *solver, Pcg *pcg) {
    removing clues until the solver can no longer completely solve the
    board. Also compute deduction statistics for final clueset to gauge
    board difficulty. */
-int backward_pass(BoardState *bs, int *clues, int num_clues, DeductionStats *stats, Solver *solver) {
+int backward_pass(BoardState *bs, int *clues, int num_clues, DeductionStats *stats, Solver *solver, int use_mine_count) {
   int w = bs->w;
   int h = bs->h;
   int area = bs->area;
@@ -885,7 +909,7 @@ int backward_pass(BoardState *bs, int *clues, int num_clues, DeductionStats *sta
   stats->sat_deductions = 0;
   DeductionStats tmp_stats;
 
-  solver_grind(bs, solver, &tmp_stats);
+  solver_grind(bs, solver, &tmp_stats, use_mine_count);
   memcpy(stats, &tmp_stats, sizeof(DeductionStats));
   bs_copy(bs, &old_bs);
 
@@ -894,7 +918,7 @@ int backward_pass(BoardState *bs, int *clues, int num_clues, DeductionStats *sta
     board[csq] &= ~SQ_REVEAL_BIT;
     unset_neighbor_masks(csq, bs, revealed_masks);
 
-    solver_grind(bs, solver, &tmp_stats);
+    solver_grind(bs, solver, &tmp_stats, use_mine_count);
 
     ASSERT(tmp_stats.flag_deductions + tmp_stats.reveal_deductions ==
            tmp_stats.heuristic_deductions + tmp_stats.sat_deductions);
@@ -924,9 +948,32 @@ int backward_pass(BoardState *bs, int *clues, int num_clues, DeductionStats *sta
   return num_clues;
 }
 
+void init_masks(BoardState *bs) {
+  for (int sq = 0; sq < bs->area; sq++) {
+    bs->revealed_masks[sq] = 0;
+    bs->flagged_masks[sq] = 0;
+
+    unsigned char imask = 0b11111111;
+    int x = sq % bs->w;
+    int y = sq / bs->w;
+    if (x == 0)
+      imask &= 0b01101011;
+    else if (x == bs->w - 1)
+      imask &= 0b11010110;
+    if (y == 0)
+      imask &= 0b00011111;
+    else if (y == bs->h - 1)
+      imask &= 0b11111000;
+    bs->interior_masks[sq] = imask;
+  }
+}
+
 /* -----------------------------------------------------------------------------
                                      MAIN
    ----------------------------------------------------------------------------- */
+
+#define RED   "\033[31m"
+#define RESET "\033[0m"
 
 int _compare_int(const void *x, const void *y) {
   int a = *((int *) x);
@@ -934,48 +981,28 @@ int _compare_int(const void *x, const void *y) {
   return a < b ? -1 : a == b ? 0 : 1;
 }
 
-int main(int argc, char **argv) {
-  if (argc != 6) {
-    fprintf(stderr, "usage: genboard <w> <h> <mines> <board_seed> <solve_seed>\n");
-    return 1;
-  }
-
+int cmd_gen(char **argv) {
   BoardState bs;
-  int w = (int) strtoul(argv[1], NULL, 10);
-  int h = (int) strtoul(argv[2], NULL, 10);
+  int w = (int) strtoul(argv[2], NULL, 10);
+  int h = (int) strtoul(argv[3], NULL, 10);
   int area = w * h;
-  int mine_count = (int) strtoul(argv[3], NULL, 10);
+  int mine_count = (int) strtoul(argv[4], NULL, 10);
   bs_init(&bs, w, h, mine_count);
 
   Pcg board_pcg;
-  uint64_t board_seed = strtoull(argv[4], NULL, 10);
+  uint64_t board_seed = strtoull(argv[5], NULL, 10);
   board_pcg.state = board_seed;
   board_pcg.inc = 676767676767676767ULL;
 
   Pcg solve_pcg;
-  uint64_t solve_seed = strtoull(argv[5], NULL, 10);
+  uint64_t solve_seed = strtoull(argv[6], NULL, 10);
   solve_pcg.state = solve_seed;
   solve_pcg.inc = 676767676767676767ULL;
 
+  int use_mine_count = strtol(argv[7], NULL, 10);
   int *buf = malloc((bs.area + bs.mine_count) * sizeof(int));
 
-  for (int sq = 0; sq < bs.area; sq++) {
-    bs.revealed_masks[sq] = 0;
-    bs.flagged_masks[sq] = 0;
-
-    unsigned char imask = 0b11111111;
-    int x = sq % bs.w;
-    int y = sq / bs.w;
-    if (x == 0)
-      imask &= 0b01101011;
-    else if (x == bs.w - 1)
-      imask &= 0b11010110;
-    if (y == 0)
-      imask &= 0b00011111;
-    else if (y == bs.h - 1)
-      imask &= 0b11111000;
-    bs.interior_masks[sq] = imask;
-  }
+  init_masks(&bs);
 
   place_mines(&bs, buf, &board_pcg);
 
@@ -985,11 +1012,11 @@ int main(int argc, char **argv) {
   fprintf(stderr, "FORWARD PASS\n");
   int num_clues;
   int *clues = malloc(area * sizeof(int));
-  num_clues = forward_pass(&bs, clues, &solver, &solve_pcg);
+  num_clues = forward_pass(&bs, clues, &solver, &solve_pcg, use_mine_count);
 
   fprintf(stderr, "\nBACKWARD PASS\n");
   DeductionStats stats;
-  num_clues = backward_pass(&bs, clues, num_clues, &stats, &solver);
+  num_clues = backward_pass(&bs, clues, num_clues, &stats, &solver, use_mine_count);
 
   qsort(clues, num_clues, sizeof(int), _compare_int);
 
@@ -1013,4 +1040,157 @@ int main(int argc, char **argv) {
   bs_free(&bs);
   free(clues);
   free(buf);
+  return 0;
+}
+
+int cmd_solve(char **argv) {
+  BoardState bs;
+  bs.w = (int) strtoul(argv[2], NULL, 10);
+  bs.h = (int) strtoul(argv[3], NULL, 10);
+  bs.area = bs.w * bs.h;
+  bs.mine_count = (int) strtoul(argv[4], NULL, 10);
+  int use_mine_count = (int) strtoul(argv[5], NULL, 10);
+  bs.board = malloc(bs.area * sizeof(int));
+  bs.revealed_masks = malloc(bs.area);
+  bs.flagged_masks = malloc(bs.area);
+  bs.interior_masks = malloc(bs.area);
+  init_masks(&bs);
+
+  int area = bs.area;
+  int *board = bs.board;
+
+  /* ------ Parse board, chars are either '.' (for unknown) or '0-8'. ------ */
+
+  if ((int)strlen(argv[6]) != area)
+    goto err;
+
+  for (int sq = 0; sq < area; sq++) {
+    char c = argv[6][sq];
+    if (c >= '0' && c <= '8') {
+      board[sq] = (c - '0') | SQ_REVEAL_BIT;
+      set_neighbor_masks(sq, &bs, bs.revealed_masks);
+    }
+    else if (c == '.') {
+      /* Mask out the reveal bit */
+      board[sq] = 0;
+    }
+    else
+      goto err;
+  }
+
+  bs_debug2(&bs);
+
+  /* ------ Run one iteration of solver_grind()'s main loop -------*/
+  /* Heuristics are not used here. Only the very first deduction is
+     reported. */
+
+  struct timespec tv_start;
+  struct timespec tv_end;
+  clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &tv_start);
+
+  Solver solver;
+  solver_init_bufs(&solver);
+  solver_from_board(&bs, &solver, use_mine_count);
+  solver_solve(&solver);
+
+  int *frontier = malloc(area * sizeof(int));
+
+  int k = get_frontier(&bs, frontier);
+  if (k == 0)
+    goto done;
+
+  int *valid_vals = malloc(k * sizeof(int));
+  for (int i = 0; i < k; i++)
+    valid_vals[i] = solver.vals[frontier[i]] & 1;
+
+  for (int i = 0; i < k; i++) {
+    if (valid_vals[i] == 2)
+      continue;
+
+    int fsq = frontier[i];
+    int slit = (valid_vals[i] & 1) ? (fsq+1) : -(fsq+1);
+    solver_from_board(&bs, &solver, use_mine_count);
+    solver_assume(&solver, -slit);
+    solver_solve(&solver);
+
+    if (solver.is_sat == 1) {
+      for (int j = i+1; j < k; j++) {
+        int val = solver.vals[frontier[j]] & 1;
+        if (val != valid_vals[j])
+          valid_vals[j] = 2;
+      }
+    }
+
+    else {
+      int dsq;
+
+      if (slit < 0) {
+        dsq = -slit - 1;
+        ASSERT(SQ_NO_BITS(board[dsq]) != SQ_MINE);
+        board[dsq] |= SQ_REVEAL_BIT;
+      }
+
+      else {
+        dsq = slit - 1;
+        ASSERT(SQ_NO_BITS(board[dsq]) == SQ_MINE);
+        board[dsq] |= SQ_FLAG_BIT;
+      }
+      goto done;
+    }
+  }
+
+done:
+  clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &tv_end);
+
+  solver_debug(&solver);
+  fprintf(stderr, "\n");
+  bs_debug2(&bs);
+
+  double time = (double)(tv_end.tv_sec - tv_start.tv_sec) +
+    (double)(tv_end.tv_nsec - tv_start.tv_nsec) / 1000000000;
+  if (time > 0.001)
+    fprintf(stderr, "time taken: %.2gs\n", time);
+  else
+    fprintf(stderr, "time taken: %.2gus\n", time * 1000000);
+
+  free(frontier);
+  free(valid_vals);
+  solver_free(&solver);
+  bs_free(&bs);
+  return 0;
+
+err:
+  free(frontier);
+  free(valid_vals);
+  solver_free(&solver);
+  bs_free(&bs);
+
+  fprintf(stderr, RED "Invalid input\n" RESET);
+  return 1;
+}
+
+int main(int argc, char **argv) {
+  if (argc < 2)
+    goto usage;
+
+  char *cmd = argv[1];
+  if (strcmp(cmd, "gen") == 0) {
+    if (argc != 8)
+      goto usage;
+    return cmd_gen(argv);
+  }
+  else if (strcmp(cmd, "solve") == 0) {
+    if (argc != 7)
+      goto usage;
+    return cmd_solve(argv);
+  }
+  else
+    goto usage;
+
+usage:
+  fprintf(stderr, "usage:\n"
+          "genboard gen <w> <h> <mines> <board_seed> <solve_seed> <use_mine_count?>\n"
+          "OR\n"
+          "genboard solve <w> <h> <mines> <use_mine_count> <board>\n");
+  return 1;
 }

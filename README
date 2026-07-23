@@ -33,5 +33,5 @@ in crocodile/test/crocodile_static to compare against MiniCARD (the
 test script crocodile/test/run_all.sh expects the user to manually
 insert the minicard_static executable).
 
-same_board.sh is an experimental script that prints out different
-reveal sets randomly generated from the same board.
+play.py is a vibecoded Tkinter app to play boards inside an output
+json file.

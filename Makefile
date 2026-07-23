@@ -6,7 +6,7 @@ ifdef RELEASE
 	CFLAGS += -O3 -march=native
 else
 	BUILD := debug
-	CFLAGS += -DDEBUG -g -fsanitize=address -fsanitize=undefined
+	CFLAGS += -g -fsanitize=address -fsanitize=undefined
 endif
 
 all: crocodile/test/crocodile_static genboard

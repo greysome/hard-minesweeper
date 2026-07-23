@@ -1,7 +1,7 @@
 genboard
+scripts/
+boards/
 crocodile/test/crocodile_static
 crocodile/test/minicard_static
 .gdbinit
 boards.json
-play.py
-sweep.sh

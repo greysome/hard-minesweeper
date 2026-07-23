@@ -12,7 +12,6 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <sys/time.h>
 #include <unistd.h>
 
 /* Custom assert that automatically traps, allowing gdb to be used at
@@ -302,7 +301,7 @@ void solver_debug(Solver *solver) {
   }
   fprintf(stderr, "\n");
 
-  fprintf(stderr, "==================================================\n");
+  fprintf(stderr, "\033[0m==================================================\n");
 }
 
 static void _heap_verify(Solver *solver) {
